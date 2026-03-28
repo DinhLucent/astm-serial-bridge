@@ -1,4 +1,5 @@
 import logging
+from typing import Optional
 
 # ASTM Control Characters
 ENQ = b'\x05'
@@ -29,11 +30,55 @@ class ASTMFrame:
         checksum = self.calculate_checksum(frame_content)
         return STX + frame_content + checksum + CR + LF
 
+    def __repr__(self) -> str:
+        return f"ASTMFrame(seq={self.sequence}, data_len={len(self.data)}, last={self.is_last})"
+
     @staticmethod
     def calculate_checksum(data: bytes) -> bytes:
         """Calculates 8-bit checksum as two hex characters."""
         checksum = sum(data) % 256
         return f"{checksum:02X}".upper().encode()
+
+
+class FrameAssembler:
+    """Stateful assembler for reconstruction of multi-frame ASTM messages."""
+    def __init__(self):
+        self.buffer = ""
+        self.expected_seq = 1
+
+    def push_frame(self, frame_bytes: bytes) -> Optional[str]:
+        """Validate and add a frame to the buffer.
+        Returns the full record string if this was the last frame, else None.
+        """
+        if not frame_bytes.startswith(STX):
+            return None
+        
+        # Check integrity
+        # Format: <STX>seq data <term>CS1 CS2 <CR><LF>
+        # Minimum: STX(1) + SEQ(1) + TERM(1) + CS(2) + CR(1) + LF(1) = 7
+        if len(frame_bytes) < 7:
+            return None
+            
+        data_block = frame_bytes[1:-4]  # Remove STX and CS+CR+LF
+        frame_cs = frame_bytes[-4:-2]
+        
+        calculated_cs = ASTMFrame.calculate_checksum(data_block)
+        if frame_cs != calculated_cs:
+            raise ASTMProtocolError(f"Checksum mismatch: got {frame_cs}, expected {calculated_cs}")
+        
+        seq = int(data_block[0:1].decode())
+        content = data_block[1:-1].decode()
+        terminator = data_block[-1:]
+        
+        self.buffer += content
+        self.expected_seq = (seq + 1) % 8
+        
+        if terminator == ETX:
+            complete = self.buffer
+            self.buffer = ""
+            self.expected_seq = 1
+            return complete
+        return None
 
 class ASTMLayer:
     """Handles ASTM logical layer (E1394)."""
